@@ -1,6 +1,15 @@
-/target
-/.idea
+# Maven
+/target/
+
+# IntelliJ
+/.idea/
 *.iml
+
+# Logs
 *.log
+
+# OS files
+.DS_Store
+
+# Environment
 .env
-application-local.yml
