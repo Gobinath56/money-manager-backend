@@ -19,6 +19,13 @@ public class AccountService {
         return accountRepository.save(account);
     }
 
+    public void deleteAccount(String id) {
+        Account account = accountRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Account not found"));
+
+        accountRepository.delete(account);
+    }
+
     public List<Account> getAllAccounts() {
         return accountRepository.findAll();
     }

@@ -124,27 +124,28 @@ public class TransactionService {
         double balance = totalIncome - totalExpenditure;
 
         // Monthly
-        LocalDateTime startOfMonth = now.withDayOfMonth(1).withHour(0).withMinute(0).withSecond(0);
+        LocalDateTime startOfMonth = now.withDayOfMonth(1)
+                .withHour(0).withMinute(0).withSecond(0);
+
         DashboardResponse.SummaryData monthlySummary =
                 calculateSummary(filterByDateRange(allTransactions, startOfMonth, now));
 
         // Weekly
         LocalDateTime startOfWeek = now.minusDays(7);
+
         DashboardResponse.SummaryData weeklySummary =
                 calculateSummary(filterByDateRange(allTransactions, startOfWeek, now));
 
         // Yearly
-        LocalDateTime startOfYear = now.withDayOfYear(1).withHour(0).withMinute(0).withSecond(0);
+        LocalDateTime startOfYear = now.withDayOfYear(1)
+                .withHour(0).withMinute(0).withSecond(0);
+
         DashboardResponse.SummaryData yearlySummary =
                 calculateSummary(filterByDateRange(allTransactions, startOfYear, now));
 
-        // Category-wise Summary (NEW FEATURE)
-        Map<Category, Double> categorySummary = allTransactions.stream()
-                .filter(t -> t.getType() == TransactionType.EXPENSE)
-                .collect(Collectors.groupingBy(
-                        Transaction::getCategory,
-                        Collectors.summingDouble(Transaction::getAmount)
-                ));
+        // Category Summary (Expenses Only)
+        Map<String, Double> categorySummary =
+                calculateCategorySummary(allTransactions);
 
         DashboardResponse response = new DashboardResponse();
         response.setTotalIncome(totalIncome);
@@ -154,8 +155,6 @@ public class TransactionService {
         response.setMonthlySummary(monthlySummary);
         response.setWeeklySummary(weeklySummary);
         response.setYearlySummary(yearlySummary);
-
-        // You must add this field in DashboardResponse class:
         response.setCategorySummary(categorySummary);
 
         return response;
@@ -175,6 +174,15 @@ public class TransactionService {
             );
         }
     }
+    private Map<String, Double> calculateCategorySummary(List<Transaction> transactions) {
+        return transactions.stream()
+                .filter(t -> t.getType() == TransactionType.EXPENSE)
+                .collect(Collectors.groupingBy(
+                        t -> t.getCategory().name(),
+                        Collectors.summingDouble(Transaction::getAmount)
+                ));
+    }
+
 
     private void validateCategory(TransactionType type, Category category) {
 

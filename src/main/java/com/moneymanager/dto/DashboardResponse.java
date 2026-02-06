@@ -17,7 +17,8 @@ public class DashboardResponse {
     private Double totalExpenditure;
     private Double balance;
     private List<Transaction> transactions;
-    private Map<Transaction.Category, Double> categorySummary;
+    //private Map<Transaction.Category, Double> categorySummary;
+    private Map<String, Double> categorySummary;
 
     // Summary data
     private SummaryData monthlySummary;

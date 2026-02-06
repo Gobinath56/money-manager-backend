@@ -22,6 +22,11 @@ public class AccountController {
     public ResponseEntity<Account> createAccount(@Valid @RequestBody Account account) {
         return ResponseEntity.ok(accountService.createAccount(account));
     }
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteAccount(@PathVariable String id) {
+        accountService.deleteAccount(id);
+        return ResponseEntity.noContent().build();
+    }
 
     @GetMapping
     public ResponseEntity<List<Account>> getAllAccounts() {
