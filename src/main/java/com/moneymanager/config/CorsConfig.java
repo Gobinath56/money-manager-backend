@@ -21,7 +21,8 @@ public class CorsConfig {
         // Allow localhost and your Vercel domain explicitly
         config.setAllowedOriginPatterns(Arrays.asList(
                 "http://localhost:3000",
-                "https://money-manager-frontend-kp4l.vercel.app"
+                "https://money-manager-frontend-kp4l.vercel.app",
+                "https://*.vercel.app"  // Allow all Vercel preview deployments
         ));
 
         config.setAllowedHeaders(Arrays.asList("*"));
