@@ -13,7 +13,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/accounts")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "http://localhost:3000")
+//@CrossOrigin(origins = "http://localhost:3000")
 public class AccountController {
 
     private final AccountService accountService;
