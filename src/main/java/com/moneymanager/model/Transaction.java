@@ -16,7 +16,9 @@ public class Transaction {
     
     @Id
     private String id;
-    
+
+    private String userId;
+
     private TransactionType type; // INCOME or EXPENSE
     
     private Double amount;

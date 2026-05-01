@@ -18,6 +18,7 @@ public class Account {
 
     @Id
     private String id;
+    private String userId;
     @NotBlank(message = "Account name is required")
     @Size(max = 50)
     private String name;

@@ -9,6 +9,7 @@ import com.moneymanager.model.Transaction.Category;
 import com.moneymanager.model.Transaction.Division;
 import com.moneymanager.model.Transaction.TransactionType;
 import com.moneymanager.repository.TransactionRepository;
+import com.moneymanager.util.SecurityUtils;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -22,11 +23,15 @@ import java.util.stream.Collectors;
 public class TransactionService {
 
     private final TransactionRepository transactionRepository;
+    private final SecurityUtils securityUtils;
 
-    // ===========================
-    // CREATE TRANSACTION
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  CREATE
+    // ═══════════════════════════════════════════
+
     public Transaction createTransaction(TransactionRequest request) {
+
+        // Rule: no future-dated transactions
         if (request.getDate().isAfter(LocalDateTime.now())) {
             throw new IllegalArgumentException("Transaction date cannot be in the future");
         }
@@ -34,6 +39,12 @@ public class TransactionService {
         validateCategory(request.getType(), request.getCategory());
 
         Transaction transaction = new Transaction();
+
+        // ── Key line: tag this transaction with the logged-in user's email ──
+        // securityUtils reads from SecurityContextHolder, which JwtAuthFilter
+        // populates on every authenticated request.
+        transaction.setUserId(securityUtils.getCurrentUserEmail());
+
         transaction.setType(request.getType());
         transaction.setAmount(request.getAmount());
         transaction.setDescription(request.getDescription());
@@ -48,27 +59,43 @@ public class TransactionService {
         return transactionRepository.save(transaction);
     }
 
-    // ===========================
-    // GET ALL
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  GET ALL  —  scoped to current user
+    // ═══════════════════════════════════════════
+
     public List<Transaction> getAllTransactions() {
-        return transactionRepository.findAll();
+        // Before fix: transactionRepository.findAll() → returned EVERYONE's data
+        // After fix:  findByUserId(email)             → returns only this user's data
+        String userId = securityUtils.getCurrentUserEmail();
+        return transactionRepository.findByUserId(userId);
     }
 
-    // ===========================
-    // GET BY ID
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  GET BY ID  —  ownership check
+    // ═══════════════════════════════════════════
+
     public Transaction getTransactionById(String id) {
+        String userId = securityUtils.getCurrentUserEmail();
+
         return transactionRepository.findById(id)
+                // .filter() on Optional: if the userId doesn't match, Optional becomes empty
+                // → falls through to orElseThrow → 404
+                .filter(t -> userId.equals(t.getUserId()))
                 .orElseThrow(() ->
                         new ResourceNotFoundException("Transaction not found with id: " + id));
+
+        // SECURITY NOTE: We return 404 whether the transaction doesn't exist OR
+        // belongs to another user. Never return 403 here — that would tell the caller
+        // "this ID exists but it's not yours", leaking other users' data.
     }
 
-    // ===========================
-    // UPDATE (WITH 12-HOUR RULE)
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  UPDATE  —  (12-hour rule + ownership)
+    // ═══════════════════════════════════════════
+
     public Transaction updateTransaction(String id, TransactionRequest request) {
 
+        // getTransactionById already checks ownership — if it passes, we own it
         Transaction transaction = getTransactionById(id);
 
         checkEditAllowed(transaction);
@@ -82,71 +109,86 @@ public class TransactionService {
         transaction.setDate(request.getDate());
         transaction.setUpdatedAt(LocalDateTime.now());
 
+        // userId is NOT updated — the owner never changes after creation
         return transactionRepository.save(transaction);
     }
 
-    // ===========================
-    // DELETE
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  DELETE  —  ownership checked
+    // ═══════════════════════════════════════════
+
     public void deleteTransaction(String id) {
+        // getTransactionById validates ownership — safe to delete
         Transaction transaction = getTransactionById(id);
         transactionRepository.delete(transaction);
     }
 
-    // ===========================
-    // FILTER
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  FILTER  —  scoped to current user
+    // ═══════════════════════════════════════════
+
     public List<Transaction> getFilteredTransactions(
             Division division,
             Category category,
             LocalDateTime startDate,
             LocalDateTime endDate
     ) {
+        String userId = securityUtils.getCurrentUserEmail();
 
-        return transactionRepository.findAll().stream()
-                .filter(t -> division == null || t.getDivision().equals(division))
-                .filter(t -> category == null || t.getCategory().equals(category))
+        // Start from only this user's transactions, then apply filters
+        return transactionRepository.findByUserId(userId).stream()
+                .filter(t -> division  == null || t.getDivision().equals(division))
+                .filter(t -> category  == null || t.getCategory().equals(category))
                 .filter(t -> startDate == null || !t.getDate().isBefore(startDate))
-                .filter(t -> endDate == null || !t.getDate().isAfter(endDate))
+                .filter(t -> endDate   == null || !t.getDate().isAfter(endDate))
                 .collect(Collectors.toList());
     }
 
-    // ===========================
-    // DASHBOARD
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  DASHBOARD  —  scoped to current user
+    // ═══════════════════════════════════════════
+
     public DashboardResponse getDashboardData() {
 
-        List<Transaction> allTransactions = transactionRepository.findAll();
+        String userId = securityUtils.getCurrentUserEmail();
+
+        // Single DB call — get all this user's transactions once,
+        // then derive all summaries in-memory (avoids 6+ separate queries)
+        List<Transaction> allTransactions = transactionRepository.findByUserId(userId);
+
         LocalDateTime now = LocalDateTime.now();
 
-        double totalIncome = calculateTotal(allTransactions, TransactionType.INCOME);
-        double totalExpenditure = calculateTotal(allTransactions, TransactionType.EXPENSE);
-        double balance = totalIncome - totalExpenditure;
+        // ── Totals ────────────────────────────────────────────────────────
+        double totalIncome       = calculateTotal(allTransactions, TransactionType.INCOME);
+        double totalExpenditure  = calculateTotal(allTransactions, TransactionType.EXPENSE);
+        double balance           = totalIncome - totalExpenditure;
 
-        // Monthly
-        LocalDateTime startOfMonth = now.withDayOfMonth(1)
-                .withHour(0).withMinute(0).withSecond(0);
+        // ── Monthly summary (1st of current month → now) ──────────────────
+        LocalDateTime startOfMonth = now
+                .withDayOfMonth(1)
+                .withHour(0).withMinute(0).withSecond(0).withNano(0);
 
         DashboardResponse.SummaryData monthlySummary =
                 calculateSummary(filterByDateRange(allTransactions, startOfMonth, now));
 
-        // Weekly
+        // ── Weekly summary (last 7 days → now) ────────────────────────────
         LocalDateTime startOfWeek = now.minusDays(7);
 
         DashboardResponse.SummaryData weeklySummary =
                 calculateSummary(filterByDateRange(allTransactions, startOfWeek, now));
 
-        // Yearly
-        LocalDateTime startOfYear = now.withDayOfYear(1)
-                .withHour(0).withMinute(0).withSecond(0);
+        // ── Yearly summary (Jan 1 → now) ──────────────────────────────────
+        LocalDateTime startOfYear = now
+                .withDayOfYear(1)
+                .withHour(0).withMinute(0).withSecond(0).withNano(0);
 
         DashboardResponse.SummaryData yearlySummary =
                 calculateSummary(filterByDateRange(allTransactions, startOfYear, now));
 
-        // Category Summary (Expenses Only)
-        Map<String, Double> categorySummary =
-                calculateCategorySummary(allTransactions);
+        // ── Category breakdown (expenses only) ────────────────────────────
+        Map<String, Double> categorySummary = calculateCategorySummary(allTransactions);
 
+        // ── Build and return response ─────────────────────────────────────
         DashboardResponse response = new DashboardResponse();
         response.setTotalIncome(totalIncome);
         response.setTotalExpenditure(totalExpenditure);
@@ -160,55 +202,66 @@ public class TransactionService {
         return response;
     }
 
-    // ===========================
-    // PRIVATE METHODS
-    // ===========================
+    // ═══════════════════════════════════════════
+    //  PRIVATE HELPERS
+    // ═══════════════════════════════════════════
 
+    /**
+     * Throws EditNotAllowedException if more than 12 hours have passed since creation.
+     * Duration.between() returns a Duration object — .toHours() converts to whole hours.
+     */
     private void checkEditAllowed(Transaction transaction) {
-
         Duration duration = Duration.between(transaction.getCreatedAt(), LocalDateTime.now());
-
         if (duration.toHours() > 12) {
             throw new EditNotAllowedException(
                     "You can only edit transactions within 12 hours of creation."
             );
         }
     }
+
+    /**
+     * Groups expense transactions by category name, summing amounts.
+     * Collectors.groupingBy = SQL GROUP BY
+     * Collectors.summingDouble = SQL SUM()
+     */
     private Map<String, Double> calculateCategorySummary(List<Transaction> transactions) {
         return transactions.stream()
                 .filter(t -> t.getType() == TransactionType.EXPENSE)
                 .collect(Collectors.groupingBy(
-                        t -> t.getCategory().name(),
+                        t -> t.getCategory().name(),        // key = "FOOD", "FUEL" etc.
                         Collectors.summingDouble(Transaction::getAmount)
                 ));
     }
 
-
+    /**
+     * Validates that the chosen category is valid for the given transaction type.
+     * Income can only use income categories; expense can only use expense categories.
+     */
     private void validateCategory(TransactionType type, Category category) {
-
         if (type == TransactionType.INCOME) {
-            if (!(category == Category.SALARY ||
-                    category == Category.FREELANCE ||
-                    category == Category.INVESTMENT ||
-                    category == Category.OTHER)) {
-
+            EnumSet<Category> incomeCategories = EnumSet.of(
+                    Category.SALARY, Category.FREELANCE, Category.INVESTMENT, Category.OTHER
+            );
+            if (!incomeCategories.contains(category)) {
                 throw new IllegalArgumentException("Invalid category for INCOME transaction");
             }
         }
 
         if (type == TransactionType.EXPENSE) {
-            if (!(category == Category.FUEL ||
-                    category == Category.FOOD ||
-                    category == Category.MOVIE ||
-                    category == Category.LOAN ||
-                    category == Category.MEDICAL ||
-                    category == Category.OTHER)) {
-
+            EnumSet<Category> expenseCategories = EnumSet.of(
+                    Category.FUEL, Category.FOOD, Category.MOVIE,
+                    Category.LOAN, Category.MEDICAL, Category.OTHER
+            );
+            if (!expenseCategories.contains(category)) {
                 throw new IllegalArgumentException("Invalid category for EXPENSE transaction");
             }
         }
     }
 
+    /**
+     * Sums amounts for all transactions of a given type in the list.
+     * mapToDouble() converts Stream<Transaction> to DoubleStream so .sum() is available.
+     */
     private double calculateTotal(List<Transaction> transactions, TransactionType type) {
         return transactions.stream()
                 .filter(t -> t.getType().equals(type))
@@ -216,6 +269,12 @@ public class TransactionService {
                 .sum();
     }
 
+    /**
+     * Filters a list to only transactions whose date falls within [start, end].
+     * isBefore/isAfter are exclusive, so we negate them for inclusive bounds.
+     * !isBefore(start) means date >= start
+     * !isAfter(end)    means date <= end
+     */
     private List<Transaction> filterByDateRange(
             List<Transaction> transactions,
             LocalDateTime start,
@@ -226,12 +285,12 @@ public class TransactionService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Calculates income, expenditure, and balance for a list of transactions.
+     */
     private DashboardResponse.SummaryData calculateSummary(List<Transaction> transactions) {
-
-        double income = calculateTotal(transactions, TransactionType.INCOME);
-        double expenditure = calculateTotal(transactions, TransactionType.EXPENSE);
-        double balance = income - expenditure;
-
-        return new DashboardResponse.SummaryData(income, expenditure, balance);
+        double income       = calculateTotal(transactions, TransactionType.INCOME);
+        double expenditure  = calculateTotal(transactions, TransactionType.EXPENSE);
+        return new DashboardResponse.SummaryData(income, expenditure, income - expenditure);
     }
 }
