@@ -285,6 +285,26 @@ public class TransactionService {
                 .collect(Collectors.toList());
     }
 
+    // Internal method — used by scheduler only, no SecurityContext needed
+// "package-private" (no access modifier) means only classes in the same
+// package can call it — not accessible from controllers
+    Transaction createTransactionInternal(String userId, TransactionRequest request) {
+        validateCategory(request.getType(), request.getCategory());
+
+        Transaction transaction = new Transaction();
+        transaction.setUserId(userId);               // userId passed directly
+        transaction.setType(request.getType());
+        transaction.setAmount(request.getAmount());
+        transaction.setDescription(request.getDescription());
+        transaction.setCategory(request.getCategory());
+        transaction.setDivision(request.getDivision());
+        transaction.setDate(request.getDate());
+        LocalDateTime now = LocalDateTime.now();
+        transaction.setCreatedAt(now);
+        transaction.setUpdatedAt(now);
+
+        return transactionRepository.save(transaction);
+    }
     /**
      * Calculates income, expenditure, and balance for a list of transactions.
      */
