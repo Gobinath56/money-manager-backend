@@ -22,7 +22,9 @@ public class Transaction {
     private TransactionType type; // INCOME or EXPENSE
     
     private Double amount;
-    
+
+    private String accountId;
+
     private String description;
     
     private Category category;

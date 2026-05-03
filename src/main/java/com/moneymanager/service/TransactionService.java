@@ -4,10 +4,12 @@ import com.moneymanager.dto.DashboardResponse;
 import com.moneymanager.dto.TransactionRequest;
 import com.moneymanager.exception.EditNotAllowedException;
 import com.moneymanager.exception.ResourceNotFoundException;
+import com.moneymanager.model.Account;
 import com.moneymanager.model.Transaction;
 import com.moneymanager.model.Transaction.Category;
 import com.moneymanager.model.Transaction.Division;
 import com.moneymanager.model.Transaction.TransactionType;
+import com.moneymanager.repository.AccountRepository;
 import com.moneymanager.repository.TransactionRepository;
 import com.moneymanager.util.SecurityUtils;
 import lombok.RequiredArgsConstructor;
@@ -29,29 +31,44 @@ public class TransactionService {
     //  CREATE
     // ═══════════════════════════════════════════
 
-    public Transaction createTransaction(TransactionRequest request) {
+    // In TransactionService.java — inject AccountRepository
+    private final AccountRepository accountRepository;
 
-        // Rule: no future-dated transactions
+    public Transaction createTransaction(TransactionRequest request) {
         if (request.getDate().isAfter(LocalDateTime.now())) {
             throw new IllegalArgumentException("Transaction date cannot be in the future");
         }
-
         validateCategory(request.getType(), request.getCategory());
 
+        // ── Find the account this transaction belongs to ──────────────────────
+        String userId = securityUtils.getCurrentUserEmail();
+        Account account = accountRepository.findByIdAndUserId(
+                        request.getAccountId(), userId)
+                .orElseThrow(() -> new ResourceNotFoundException("Account not found"));
+
+        // ── Update balance based on transaction type ───────────────────────────
+        // INCOME → money coming IN → add to balance
+        // EXPENSE → money going OUT → subtract from balance
+        if (request.getType() == TransactionType.INCOME) {
+            account.setBalance(account.getBalance() + request.getAmount());
+        } else {
+            if (account.getBalance() < request.getAmount()) {
+                throw new IllegalArgumentException("Insufficient balance in account");
+            }
+            account.setBalance(account.getBalance() - request.getAmount());
+        }
+        accountRepository.save(account);
+
+        // ── Save the transaction ───────────────────────────────────────────────
         Transaction transaction = new Transaction();
-
-        // ── Key line: tag this transaction with the logged-in user's email ──
-        // securityUtils reads from SecurityContextHolder, which JwtAuthFilter
-        // populates on every authenticated request.
-        transaction.setUserId(securityUtils.getCurrentUserEmail());
-
+        transaction.setUserId(userId);
+        transaction.setAccountId(request.getAccountId()); // ← link to account
         transaction.setType(request.getType());
         transaction.setAmount(request.getAmount());
         transaction.setDescription(request.getDescription());
         transaction.setCategory(request.getCategory());
         transaction.setDivision(request.getDivision());
         transaction.setDate(request.getDate());
-
         LocalDateTime now = LocalDateTime.now();
         transaction.setCreatedAt(now);
         transaction.setUpdatedAt(now);
@@ -118,8 +135,22 @@ public class TransactionService {
     // ═══════════════════════════════════════════
 
     public void deleteTransaction(String id) {
-        // getTransactionById validates ownership — safe to delete
         Transaction transaction = getTransactionById(id);
+
+        // ── Reverse the balance change when deleting ───────────────────────────
+        accountRepository.findByIdAndUserId(
+                        transaction.getAccountId(),
+                        securityUtils.getCurrentUserEmail())
+                .ifPresent(account -> {
+                    // Reverse: if it was INCOME, remove it. If EXPENSE, add it back.
+                    if (transaction.getType() == TransactionType.INCOME) {
+                        account.setBalance(account.getBalance() - transaction.getAmount());
+                    } else {
+                        account.setBalance(account.getBalance() + transaction.getAmount());
+                    }
+                    accountRepository.save(account);
+                });
+
         transactionRepository.delete(transaction);
     }
 
@@ -308,6 +339,7 @@ public class TransactionService {
     /**
      * Calculates income, expenditure, and balance for a list of transactions.
      */
+
     private DashboardResponse.SummaryData calculateSummary(List<Transaction> transactions) {
         double income       = calculateTotal(transactions, TransactionType.INCOME);
         double expenditure  = calculateTotal(transactions, TransactionType.EXPENSE);
