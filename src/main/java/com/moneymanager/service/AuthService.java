@@ -46,4 +46,7 @@ public class AuthService {
         String token = jwtService.generateToken(user.getEmail());
         return new AuthResponse(token, user.getEmail());
     }
+
+    // In AuthService — add to constructor injection
+
 }

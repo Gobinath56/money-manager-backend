@@ -29,6 +29,8 @@ public class TransactionRequest {
     @NotNull(message = "Category is required")
     private Category category;
 
+    private String subCategory;   // optional — no @NotNull
+
     @NotNull(message = "Account is required")
     private String accountId;
 
