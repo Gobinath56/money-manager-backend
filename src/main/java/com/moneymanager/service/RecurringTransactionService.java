@@ -5,7 +5,6 @@ import com.moneymanager.dto.TransactionRequest;
 import com.moneymanager.exception.ResourceNotFoundException;
 import com.moneymanager.model.RecurringTransaction;
 import com.moneymanager.model.RecurringTransaction.Frequency;
-import com.moneymanager.model.Transaction;
 import com.moneymanager.repository.RecurringTransactionRepository;
 import com.moneymanager.util.SecurityUtils;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +15,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.List;
 
-@Slf4j                   // gives us log.info(), log.error() etc. via Lombok
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class RecurringTransactionService {
@@ -27,6 +26,10 @@ public class RecurringTransactionService {
 
     // ══════════════════════════════════════════
     //  CREATE
+    //
+    //  BUG FIX: accountId is now saved onto the RecurringTransaction document.
+    //  Previously accountId was missing from the model and request DTO entirely,
+    //  so it was impossible to link recurring transactions to any account.
     // ══════════════════════════════════════════
 
     public RecurringTransaction create(RecurringTransactionRequest req) {
@@ -38,8 +41,9 @@ public class RecurringTransactionService {
         r.setType(req.getType());
         r.setCategory(req.getCategory());
         r.setDivision(req.getDivision());
+        r.setAccountId(req.getAccountId()); // ← BUG FIX: was missing entirely
         r.setFrequency(req.getFrequency());
-        r.setNextRunDate(req.getStartDate());  // first run = startDate
+        r.setNextRunDate(req.getStartDate());
         r.setCreatedAt(LocalDateTime.now());
         r.setActive(true);
 
@@ -47,7 +51,7 @@ public class RecurringTransactionService {
     }
 
     // ══════════════════════════════════════════
-    //  GET ALL for current user
+    //  GET ALL
     // ══════════════════════════════════════════
 
     public List<RecurringTransaction> getAllForCurrentUser() {
@@ -63,7 +67,7 @@ public class RecurringTransactionService {
         RecurringTransaction r = recurringRepo.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Recurring transaction not found"));
 
-        r.setActive(!r.isActive());   // flip the boolean
+        r.setActive(!r.isActive());
         return recurringRepo.save(r);
     }
 
@@ -79,7 +83,24 @@ public class RecurringTransactionService {
     }
 
     // ══════════════════════════════════════════
-    //  RUN ONE MANUALLY (from frontend button)
+    //  RUN NOW  —  BUG FIX: was not updating account balance
+    //
+    //  THE BUG:
+    //    runNow() called createTransactionFrom(r) which called
+    //    createTransactionInternal() — a method that skipped balance updates
+    //    (original version had no balance logic at all).
+    //    Result: clicking "Run now" created a transaction record but left
+    //    the account balance completely unchanged.
+    //
+    //  THE FIX:
+    //    createTransactionInternal() now correctly updates the account balance
+    //    (see TransactionService.java fix). No change needed here in runNow()
+    //    itself — the fix is in the method it calls.
+    //
+    //    runNow() is called from an HTTP request where SecurityContext IS set,
+    //    but we still use createTransactionInternal() because we need to pass
+    //    userId directly (from the RecurringTransaction) rather than reading it
+    //    from the context — this makes it consistent with the scheduler path.
     // ══════════════════════════════════════════
 
     public void runNow(String id) {
@@ -87,35 +108,20 @@ public class RecurringTransactionService {
         RecurringTransaction r = recurringRepo.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Not found"));
 
-        createTransactionFrom(r);         // create the actual transaction
+        createTransactionFrom(r);
         r.setLastRunDate(LocalDateTime.now());
         r.setNextRunDate(calculateNext(r.getFrequency(), LocalDateTime.now()));
         recurringRepo.save(r);
     }
 
     // ══════════════════════════════════════════
-    //  @Scheduled — THE AUTO-RUN LOGIC
-    //
-    //  cron = "0 0 0 * * *"
-    //    ┌─ second (0)
-    //    │  ┌─ minute (0)
-    //    │  │  ┌─ hour (0 = midnight)
-    //    │  │  │  ┌─ day of month (* = every day)
-    //    │  │  │  │  ┌─ month (* = every month)
-    //    │  │  │  │  │  ┌─ day of week (* = every day)
-    //    0  0  0  *  *  *
-    //
-    //  This runs automatically at midnight every day.
-    //  No HTTP request needed — Spring calls it internally.
-    //  The server must be running for this to fire.
+    //  SCHEDULER  —  runs at midnight every day
     // ══════════════════════════════════════════
 
     @Scheduled(cron = "0 0 0 * * *")
     public void processAllDue() {
         LocalDateTime now = LocalDateTime.now();
 
-        // Find ALL active recurring transactions across ALL users
-        // whose nextRunDate has passed
         List<RecurringTransaction> due =
                 recurringRepo.findByActiveIsTrueAndNextRunDateLessThanEqual(now);
 
@@ -125,7 +131,6 @@ public class RecurringTransactionService {
             try {
                 createTransactionFrom(r);
 
-                // Advance nextRunDate so it doesn't fire again until next period
                 r.setLastRunDate(now);
                 r.setNextRunDate(calculateNext(r.getFrequency(), now));
                 recurringRepo.save(r);
@@ -134,7 +139,6 @@ public class RecurringTransactionService {
                         r.getDescription(), r.getUserId());
 
             } catch (Exception e) {
-                // Log and continue — one failure shouldn't stop others from running
                 log.error("Failed to process recurring transaction {}: {}",
                         r.getId(), e.getMessage());
             }
@@ -146,12 +150,11 @@ public class RecurringTransactionService {
     // ══════════════════════════════════════════
 
     /**
-     * Creates an actual Transaction from a RecurringTransaction definition.
+     * Builds a TransactionRequest from a RecurringTransaction and fires
+     * createTransactionInternal(), which now correctly updates the account balance.
      *
-     * KEY POINT: we call transactionRepository directly here instead of
-     * transactionService.createTransaction() because that method reads the
-     * current user from SecurityContext — but @Scheduled runs with NO
-     * HTTP request and NO security context. So we set userId manually.
+     * KEY: r.getAccountId() is now populated (Bug Fix #3), so the
+     * TransactionRequest carries a real accountId to the internal method.
      */
     private void createTransactionFrom(RecurringTransaction r) {
         TransactionRequest req = new TransactionRequest();
@@ -160,16 +163,15 @@ public class RecurringTransactionService {
         req.setDescription(r.getDescription() + " (auto)");
         req.setCategory(r.getCategory());
         req.setDivision(r.getDivision());
+        req.setAccountId(r.getAccountId()); // ← BUG FIX: was never set, always null
         req.setDate(LocalDateTime.now());
 
-        // Call the internal method — bypasses SecurityContext check
+        // Bypasses SecurityContext — safe for both scheduler and runNow()
         transactionService.createTransactionInternal(r.getUserId(), req);
     }
 
     /**
      * Calculates the next run date based on frequency.
-     * LocalDateTime.plusDays/plusMonths etc. handles month-length differences.
-     * e.g. Jan 31 + 1 month = Feb 28 (not March 2)
      */
     private LocalDateTime calculateNext(Frequency frequency, LocalDateTime from) {
         return switch (frequency) {
@@ -178,6 +180,5 @@ public class RecurringTransactionService {
             case MONTHLY -> from.plusMonths(1);
             case YEARLY  -> from.plusYears(1);
         };
-        // switch expression (Java 14+) — no break needed, returns the value directly
     }
 }

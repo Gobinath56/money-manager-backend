@@ -26,9 +26,25 @@ public class RecurringTransactionRequest {
     @NotNull
     private Division division;
 
-    @NotNull
-    private Frequency frequency;     // DAILY / WEEKLY / MONTHLY / YEARLY
+    // ── BUG FIX: accountId was missing ──────────────────────────────────────
+    //
+    // THE BUG:
+    //   RecurringTransactionRequest had no accountId. So when a user created
+    //   a recurring transaction, there was no way to associate it with any
+    //   account. The scheduler then created real Transaction records with
+    //   accountId = null, and never updated any account balance.
+    //
+    // THE FIX:
+    //   Add accountId here so the frontend can send it when creating a
+    //   recurring transaction. The RecurringTransactionService.create()
+    //   method saves it onto the RecurringTransaction document. The scheduler
+    //   later reads it when auto-firing the transaction.
+    @NotNull(message = "Account is required")
+    private String accountId;
 
     @NotNull
-    private java.time.LocalDateTime startDate; // when should it first run?
+    private Frequency frequency;
+
+    @NotNull
+    private java.time.LocalDateTime startDate;
 }

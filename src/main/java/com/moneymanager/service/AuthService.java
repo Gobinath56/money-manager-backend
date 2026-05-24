@@ -5,6 +5,7 @@ import com.moneymanager.dto.AuthResponse;
 import com.moneymanager.model.User;
 import com.moneymanager.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -13,8 +14,13 @@ import org.springframework.stereotype.Service;
 public class AuthService {
 
     private final UserRepository userRepository;
-    private final PasswordEncoder passwordEncoder;    // injected from SecurityConfig
+    private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
+
+    // @Lazy breaks the circular dependency.
+    // Spring won't try to build UserCategoryService at startup —
+    // it creates a proxy and only resolves it on the first actual call.
+    private final @Lazy UserCategoryService userCategoryService;
 
     public AuthResponse register(AuthRequest request) {
         if (userRepository.existsByEmail(request.getEmail())) {
@@ -24,9 +30,10 @@ public class AuthService {
         User user = new User();
         user.setEmail(request.getEmail());
         user.setPassword(passwordEncoder.encode(request.getPassword()));
-        // encode() → BCrypt hash. NEVER store raw passwords.
-
         userRepository.save(user);
+
+        // Called lazily — UserCategoryService is resolved here, not at startup
+        userCategoryService.seedDefaultsForUser(user.getEmail());
 
         String token = jwtService.generateToken(user.getEmail());
         return new AuthResponse(token, user.getEmail());
@@ -37,16 +44,10 @@ public class AuthService {
                 .orElseThrow(() -> new RuntimeException("Invalid credentials"));
 
         if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
-            // matches(rawPassword, encodedHash) — BCrypt handles the comparison
             throw new RuntimeException("Invalid credentials");
         }
-        // Same error message for both "user not found" and "wrong password"
-        // so attackers can't tell which one failed (security best practice)
 
         String token = jwtService.generateToken(user.getEmail());
         return new AuthResponse(token, user.getEmail());
     }
-
-    // In AuthService — add to constructor injection
-
 }
