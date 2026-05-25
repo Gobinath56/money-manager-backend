@@ -12,13 +12,15 @@ import com.moneymanager.repository.AccountRepository;
 import com.moneymanager.repository.TransactionRepository;
 import com.moneymanager.util.SecurityUtils;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-
+import java.util.Optional;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class TransactionService {
@@ -202,8 +204,14 @@ public class TransactionService {
 
         double totalIncome      = calculateTotal(allTransactions, TransactionType.INCOME);
         double totalExpenditure = calculateTotal(allTransactions, TransactionType.EXPENSE);
-        double balance          = totalIncome - totalExpenditure;
 
+        // FIX: read real account balances instead of calculating income - expense
+        List<Account> userAccounts = accountRepository.findByUserId(userId);
+        double balance = userAccounts.stream()
+                .mapToDouble(a -> a.getBalance() != null ? a.getBalance() : 0.0)
+                .sum();
+
+        // rest stays exactly the same...
         LocalDateTime startOfMonth = now.withDayOfMonth(1)
                 .withHour(0).withMinute(0).withSecond(0).withNano(0);
         DashboardResponse.SummaryData monthlySummary =
@@ -223,7 +231,7 @@ public class TransactionService {
         DashboardResponse response = new DashboardResponse();
         response.setTotalIncome(totalIncome);
         response.setTotalExpenditure(totalExpenditure);
-        response.setBalance(balance);
+        response.setBalance(balance);  // now uses real account balance sum
         response.setTransactions(allTransactions);
         response.setMonthlySummary(monthlySummary);
         response.setWeeklySummary(weeklySummary);
@@ -239,16 +247,25 @@ public class TransactionService {
 
     public Transaction createTransactionInternal(String userId, TransactionRequest request) {
 
+        // Update account balance
         if (request.getAccountId() != null) {
-            accountRepository.findByIdAndUserId(request.getAccountId(), userId)
-                    .ifPresent(account -> {
-                        if (request.getType() == TransactionType.INCOME) {
-                            account.setBalance(account.getBalance() + request.getAmount());
-                        } else if (account.getBalance() >= request.getAmount()) {
-                            account.setBalance(account.getBalance() - request.getAmount());
-                        }
+
+            Account account = accountRepository
+                    .findByIdAndUserId(request.getAccountId(), userId)
+                    .orElse(null);
+
+            if (account != null) {
+                if (request.getType() == TransactionType.INCOME) {
+                    account.setBalance(account.getBalance() + request.getAmount());
+                    accountRepository.save(account);
+                } else {
+                    if (account.getBalance() >= request.getAmount()) {
+                        account.setBalance(account.getBalance() - request.getAmount());
                         accountRepository.save(account);
-                    });
+                    }
+                    // if insufficient balance, we skip but still record the transaction
+                }
+            }
         }
 
         Transaction transaction = new Transaction();
@@ -257,7 +274,7 @@ public class TransactionService {
         transaction.setType(request.getType());
         transaction.setAmount(request.getAmount());
         transaction.setDescription(request.getDescription());
-        transaction.setCategory(request.getCategory());   // String
+        transaction.setCategory(request.getCategory());
         transaction.setDivision(request.getDivision());
         transaction.setDate(request.getDate());
         LocalDateTime now = LocalDateTime.now();
