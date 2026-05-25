@@ -66,7 +66,7 @@ public class TransactionController {
     @GetMapping("/filter")
     public ResponseEntity<List<Transaction>> getFilteredTransactions(
         @RequestParam(required = false) Division division,
-        @RequestParam(required = false) Category category,
+        @RequestParam(required = false) String category,
         @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime startDate,
         @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime endDate
     ) {

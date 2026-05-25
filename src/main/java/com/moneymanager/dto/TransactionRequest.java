@@ -27,7 +27,7 @@ public class TransactionRequest {
     private String description;
     
     @NotNull(message = "Category is required")
-    private Category category;
+    private String category;
 
     private String subCategory;   // optional — no @NotNull
 

@@ -27,7 +27,7 @@ public class Transaction {
 
     private String description;
     
-    private Category category;
+    private String category;
 
     private String subCategory;   // e.g. "Lunch", "Petrol", "Hotel"
     // nullable — not all transactions need a subcategory

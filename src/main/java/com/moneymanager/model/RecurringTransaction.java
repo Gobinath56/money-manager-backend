@@ -22,7 +22,7 @@ public class RecurringTransaction {
     private String description;
     private Double amount;
     private Transaction.TransactionType type;
-    private Transaction.Category category;
+    private String category;
     private Transaction.Division division;
 
     // ── BUG FIX: accountId was missing ──────────────────────────────────────

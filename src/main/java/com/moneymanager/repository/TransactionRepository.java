@@ -1,7 +1,6 @@
 package com.moneymanager.repository;
 
 import com.moneymanager.model.Transaction;
-import com.moneymanager.model.Transaction.Category;
 import com.moneymanager.model.Transaction.Division;
 import com.moneymanager.model.Transaction.TransactionType;
 import org.springframework.data.mongodb.repository.MongoRepository;
@@ -48,7 +47,7 @@ public interface TransactionRepository extends MongoRepository<Transaction, Stri
 
     // ── Filter by category for a user ────────────────────────────────────
     // Category = FOOD, FUEL, SALARY etc.
-    List<Transaction> findByUserIdAndCategory(String userId, Category category);
+    List<Transaction> findByUserIdAndCategory(String userId, String category);
 
     // ── Filter by date range for a user ──────────────────────────────────
     // "Between" keyword → $gte startDate AND $lte endDate
@@ -80,7 +79,7 @@ public interface TransactionRepository extends MongoRepository<Transaction, Stri
     // Useful for: "how much did I spend on FOOD this month?"
     List<Transaction> findByUserIdAndCategoryAndDateBetween(
             String userId,
-            Category category,
+            String category,
             LocalDateTime startDate,
             LocalDateTime endDate
     );

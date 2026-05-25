@@ -6,7 +6,6 @@ import com.moneymanager.exception.EditNotAllowedException;
 import com.moneymanager.exception.ResourceNotFoundException;
 import com.moneymanager.model.Account;
 import com.moneymanager.model.Transaction;
-import com.moneymanager.model.Transaction.Category;
 import com.moneymanager.model.Transaction.Division;
 import com.moneymanager.model.Transaction.TransactionType;
 import com.moneymanager.repository.AccountRepository;
@@ -36,15 +35,12 @@ public class TransactionService {
         if (request.getDate().isAfter(LocalDateTime.now())) {
             throw new IllegalArgumentException("Transaction date cannot be in the future");
         }
-        validateCategory(request.getType(), request.getCategory());
 
         String userId = securityUtils.getCurrentUserEmail();
 
-        // Find the account — must belong to this user
         Account account = accountRepository.findByIdAndUserId(request.getAccountId(), userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Account not found"));
 
-        // Update balance: INCOME adds, EXPENSE subtracts
         if (request.getType() == TransactionType.INCOME) {
             account.setBalance(account.getBalance() + request.getAmount());
         } else {
@@ -55,14 +51,13 @@ public class TransactionService {
         }
         accountRepository.save(account);
 
-        // Save the transaction
         Transaction transaction = new Transaction();
         transaction.setUserId(userId);
         transaction.setAccountId(request.getAccountId());
         transaction.setType(request.getType());
         transaction.setAmount(request.getAmount());
         transaction.setDescription(request.getDescription());
-        transaction.setCategory(request.getCategory());
+        transaction.setCategory(request.getCategory());   // now a String
         transaction.setSubCategory(request.getSubCategory());
         transaction.setDivision(request.getDivision());
         transaction.setDate(request.getDate());
@@ -74,7 +69,7 @@ public class TransactionService {
     }
 
     // ═══════════════════════════════════════════
-    //  GET ALL  —  scoped to current user
+    //  GET ALL
     // ═══════════════════════════════════════════
 
     public List<Transaction> getAllTransactions() {
@@ -83,7 +78,7 @@ public class TransactionService {
     }
 
     // ═══════════════════════════════════════════
-    //  GET BY ID  —  ownership check
+    //  GET BY ID
     // ═══════════════════════════════════════════
 
     public Transaction getTransactionById(String id) {
@@ -95,45 +90,19 @@ public class TransactionService {
     }
 
     // ═══════════════════════════════════════════
-    //  UPDATE  —  BUG FIX: reverse old balance effect, apply new one
-    //
-    //  THE BUG (before fix):
-    //    updateTransaction() only saved new field values onto the transaction
-    //    document but never touched the Account balance at all.
-    //
-    //  Example of silent data corruption:
-    //    - User logs EXPENSE ₹100 → account balance correctly drops by ₹100
-    //    - User edits it to ₹500 → only the Transaction doc changes to ₹500
-    //    - Account balance still reflects the old ₹100 deduction → wrong by ₹400
-    //    - User edits type from EXPENSE → INCOME → balance is now completely wrong
-    //
-    //  THE FIX:
-    //    Step 1 — Reverse the OLD transaction's effect on the account balance.
-    //             If the old transaction was EXPENSE ₹100, add ₹100 back.
-    //             If it was INCOME ₹100, subtract ₹100 back.
-    //    Step 2 — Apply the NEW transaction's effect.
-    //             This handles all combinations: same type + new amount,
-    //             type flip (INCOME→EXPENSE), or account change.
-    //    Step 3 — Save the updated account(s) and the transaction.
+    //  UPDATE
     // ═══════════════════════════════════════════
 
     public Transaction updateTransaction(String id, TransactionRequest request) {
-        // Ownership check is inside getTransactionById
         Transaction transaction = getTransactionById(id);
-
         checkEditAllowed(transaction);
-        validateCategory(request.getType(), request.getCategory());
 
         String userId = securityUtils.getCurrentUserEmail();
 
-        // ── STEP 1: Reverse the OLD transaction's balance effect ────────────
-        // We must undo what the original transaction did to the account,
-        // regardless of whether the account itself is being changed.
+        // Step 1 — reverse old balance effect
         if (transaction.getAccountId() != null) {
             accountRepository.findByIdAndUserId(transaction.getAccountId(), userId)
                     .ifPresent(oldAccount -> {
-                        // Undo: INCOME had added money → subtract it back
-                        //       EXPENSE had removed money → add it back
                         if (transaction.getType() == TransactionType.INCOME) {
                             oldAccount.setBalance(oldAccount.getBalance() - transaction.getAmount());
                         } else {
@@ -143,9 +112,7 @@ public class TransactionService {
                     });
         }
 
-        // ── STEP 2: Apply the NEW transaction's balance effect ──────────────
-        // The new request may have a different accountId, different amount,
-        // or a different type — we handle all of that here.
+        // Step 2 — apply new balance effect
         Account newAccount = accountRepository.findByIdAndUserId(request.getAccountId(), userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Account not found"));
 
@@ -153,9 +120,7 @@ public class TransactionService {
             newAccount.setBalance(newAccount.getBalance() + request.getAmount());
         } else {
             if (newAccount.getBalance() < request.getAmount()) {
-                // Balance check failed — IMPORTANT: the old balance was already reversed above.
-                // We must re-apply the old transaction to keep the account consistent
-                // before throwing, otherwise the account is left in a partially updated state.
+                // Re-apply old transaction before throwing to keep data consistent
                 accountRepository.findByIdAndUserId(transaction.getAccountId(), userId)
                         .ifPresent(oldAccount -> {
                             if (transaction.getType() == TransactionType.INCOME) {
@@ -171,35 +136,31 @@ public class TransactionService {
         }
         accountRepository.save(newAccount);
 
-        // ── STEP 3: Update the transaction record ───────────────────────────
+        // Step 3 — update transaction record
         transaction.setAccountId(request.getAccountId());
         transaction.setType(request.getType());
         transaction.setAmount(request.getAmount());
         transaction.setDescription(request.getDescription());
-        transaction.setCategory(request.getCategory());
+        transaction.setCategory(request.getCategory());   // String
         transaction.setSubCategory(request.getSubCategory());
         transaction.setDivision(request.getDivision());
         transaction.setDate(request.getDate());
         transaction.setUpdatedAt(LocalDateTime.now());
-        // userId is never changed — owner doesn't change after creation
 
         return transactionRepository.save(transaction);
     }
 
     // ═══════════════════════════════════════════
-    //  DELETE  —  reverses balance correctly
+    //  DELETE
     // ═══════════════════════════════════════════
 
     public void deleteTransaction(String id) {
         Transaction transaction = getTransactionById(id);
 
-        // Reverse the balance change when deleting
         accountRepository.findByIdAndUserId(
                         transaction.getAccountId(),
                         securityUtils.getCurrentUserEmail())
                 .ifPresent(account -> {
-                    // Reverse: INCOME had added → subtract it back
-                    //          EXPENSE had removed → add it back
                     if (transaction.getType() == TransactionType.INCOME) {
                         account.setBalance(account.getBalance() - transaction.getAmount());
                     } else {
@@ -212,26 +173,26 @@ public class TransactionService {
     }
 
     // ═══════════════════════════════════════════
-    //  FILTER  —  scoped to current user
+    //  FILTER
     // ═══════════════════════════════════════════
 
     public List<Transaction> getFilteredTransactions(
             Division division,
-            Category category,
+            String category,          // String, not enum
             LocalDateTime startDate,
             LocalDateTime endDate
     ) {
         String userId = securityUtils.getCurrentUserEmail();
         return transactionRepository.findByUserId(userId).stream()
                 .filter(t -> division  == null || t.getDivision().equals(division))
-                .filter(t -> category  == null || t.getCategory().equals(category))
+                .filter(t -> category  == null || category.equals(t.getCategory()))  // String.equals
                 .filter(t -> startDate == null || !t.getDate().isBefore(startDate))
                 .filter(t -> endDate   == null || !t.getDate().isAfter(endDate))
                 .collect(Collectors.toList());
     }
 
     // ═══════════════════════════════════════════
-    //  DASHBOARD  —  scoped to current user
+    //  DASHBOARD
     // ═══════════════════════════════════════════
 
     public DashboardResponse getDashboardData() {
@@ -273,29 +234,11 @@ public class TransactionService {
     }
 
     // ═══════════════════════════════════════════
-    //  INTERNAL METHOD  —  used by scheduler only
-    //
-    //  THE BUG (before fix):
-    //    This method created a Transaction record but never updated the account
-    //    balance. Every recurring transaction (salary, rent, EMI) was silently
-    //    recorded without affecting any account's balance.
-    //
-    //  Also: accountId was never set on the Transaction, so every auto-created
-    //    transaction had accountId = null, making them unlinked to any account.
-    //
-    //  THE FIX:
-    //    RecurringTransaction now carries an accountId (see RecurringTransaction.java fix).
-    //    This method uses that accountId to find the account and update its balance,
-    //    exactly like createTransaction() does — but without reading from SecurityContext
-    //    (since the scheduler runs with no HTTP request and no security context).
+    //  INTERNAL — used by recurring scheduler
     // ═══════════════════════════════════════════
 
     public Transaction createTransactionInternal(String userId, TransactionRequest request) {
-        validateCategory(request.getType(), request.getCategory());
 
-        // ── Update account balance (same logic as createTransaction) ─────────
-        // accountId comes from the RecurringTransaction — it was set when the
-        // user originally created the recurring transaction.
         if (request.getAccountId() != null) {
             accountRepository.findByIdAndUserId(request.getAccountId(), userId)
                     .ifPresent(account -> {
@@ -304,21 +247,17 @@ public class TransactionService {
                         } else if (account.getBalance() >= request.getAmount()) {
                             account.setBalance(account.getBalance() - request.getAmount());
                         }
-                        // If insufficient balance for an auto-run, we skip the deduction
-                        // rather than throwing — a scheduler failure for one user should
-                        // not crash the whole processAllDue() batch.
                         accountRepository.save(account);
                     });
         }
 
-        // ── Save the transaction ─────────────────────────────────────────────
         Transaction transaction = new Transaction();
         transaction.setUserId(userId);
-        transaction.setAccountId(request.getAccountId()); // now correctly set
+        transaction.setAccountId(request.getAccountId());
         transaction.setType(request.getType());
         transaction.setAmount(request.getAmount());
         transaction.setDescription(request.getDescription());
-        transaction.setCategory(request.getCategory());
+        transaction.setCategory(request.getCategory());   // String
         transaction.setDivision(request.getDivision());
         transaction.setDate(request.getDate());
         LocalDateTime now = LocalDateTime.now();
@@ -344,30 +283,11 @@ public class TransactionService {
     private Map<String, Double> calculateCategorySummary(List<Transaction> transactions) {
         return transactions.stream()
                 .filter(t -> t.getType() == TransactionType.EXPENSE)
+                .filter(t -> t.getCategory() != null)
                 .collect(Collectors.groupingBy(
-                        t -> t.getCategory().name(),
+                        Transaction::getCategory,          // category is now a String field
                         Collectors.summingDouble(Transaction::getAmount)
                 ));
-    }
-
-    private void validateCategory(TransactionType type, Category category) {
-        if (type == TransactionType.INCOME) {
-            EnumSet<Category> incomeCategories = EnumSet.of(
-                    Category.SALARY, Category.FREELANCE, Category.INVESTMENT, Category.OTHER
-            );
-            if (!incomeCategories.contains(category)) {
-                throw new IllegalArgumentException("Invalid category for INCOME transaction");
-            }
-        }
-        if (type == TransactionType.EXPENSE) {
-            EnumSet<Category> expenseCategories = EnumSet.of(
-                    Category.FUEL, Category.FOOD, Category.MOVIE,
-                    Category.LOAN, Category.MEDICAL, Category.OTHER
-            );
-            if (!expenseCategories.contains(category)) {
-                throw new IllegalArgumentException("Invalid category for EXPENSE transaction");
-            }
-        }
     }
 
     private double calculateTotal(List<Transaction> transactions, TransactionType type) {

@@ -1,7 +1,6 @@
 package com.moneymanager.dto;
 
 import com.moneymanager.model.RecurringTransaction.Frequency;
-import com.moneymanager.model.Transaction.Category;
 import com.moneymanager.model.Transaction.Division;
 import com.moneymanager.model.Transaction.TransactionType;
 import jakarta.validation.constraints.NotNull;
@@ -21,7 +20,7 @@ public class RecurringTransactionRequest {
     private TransactionType type;
 
     @NotNull
-    private Category category;
+    private String category;
 
     @NotNull
     private Division division;
