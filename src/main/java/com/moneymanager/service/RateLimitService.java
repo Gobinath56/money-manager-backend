@@ -47,7 +47,7 @@ public class RateLimitService {
         return buckets.computeIfAbsent(ip + ":forgot", k -> {
             Bandwidth limit = Bandwidth.classic(
                     3,
-                    Refill.intervally(3, Duration.ofHours(1))
+                    Refill.intervally(20, Duration.ofHours(1))
             );
             return Bucket.builder().addLimit(limit).build();
         });
