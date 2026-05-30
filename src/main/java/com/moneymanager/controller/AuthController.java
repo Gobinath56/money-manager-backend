@@ -13,12 +13,13 @@ import io.github.bucket4j.Bucket;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
-
+@Slf4j
 @RestController
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
@@ -104,13 +105,12 @@ public class AuthController {
 
         try {
             authService.forgotPassword(request.getEmail());
-            // Always return the same message whether email exists or not.
-            // Returning "email not found" lets attackers enumerate valid emails.
             return ResponseEntity.ok(
                     Map.of("message", "If this email is registered, an OTP has been sent.")
             );
         } catch (RuntimeException e) {
-            // Log internally but return same generic message
+            // LOG the real error so you can see it in your terminal
+            log.error("forgotPassword failed: {}", e.getMessage(), e);
             return ResponseEntity.ok(
                     Map.of("message", "If this email is registered, an OTP has been sent.")
             );

@@ -1,0 +1,22 @@
+# Maven
+target/
+
+# IntelliJ
+.idea/
+*.iml
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Environment
+.env
+*.env
+
+# Spring Config
+src/main/resources/application-local.properties
+src/main/resources/application-prod.properties

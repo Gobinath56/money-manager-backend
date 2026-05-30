@@ -5,6 +5,7 @@ import com.moneymanager.dto.AuthResponse;
 import com.moneymanager.model.User;
 import com.moneymanager.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -18,6 +19,8 @@ import com.moneymanager.service.EmailService;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.Random;
+
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AuthService {
@@ -63,17 +66,16 @@ public class AuthService {
         return new AuthResponse(token, user.getEmail());
     }
     public void forgotPassword(String email) {
-        // Check user exists
         userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("No account found with this email"));
 
-        // Delete any existing OTP for this email
         passwordResetTokenRepository.deleteByEmail(email);
 
-        // Generate 6-digit OTP
         String otp = String.format("%06d", SECURE_RANDOM.nextInt(999999));
 
-        // Save OTP to DB with 10 min expiry
+        // ── TEMP: log OTP so you can test reset flow without SMTP ──
+        log.info(">>> OTP for {} is: {}", email, otp);
+
         PasswordResetToken token = new PasswordResetToken();
         token.setEmail(email);
         token.setOtp(otp);
@@ -81,10 +83,8 @@ public class AuthService {
         token.setUsed(false);
         passwordResetTokenRepository.save(token);
 
-        // Send OTP email
         emailService.sendOtpEmail(email, otp);
     }
-
     // ── Method 2: Reset Password ──────────────────────────────────────────────
     public void resetPassword(ResetPasswordRequest request) {
         // Find OTP record
