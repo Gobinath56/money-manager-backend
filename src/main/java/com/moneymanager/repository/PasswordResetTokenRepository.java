@@ -1,0 +1,13 @@
+package com.moneymanager.repository;
+
+import com.moneymanager.model.PasswordResetToken;
+import org.springframework.data.mongodb.repository.MongoRepository;
+
+import java.util.Optional;
+
+public interface PasswordResetTokenRepository
+        extends MongoRepository<PasswordResetToken, String> {
+
+    Optional<PasswordResetToken> findByEmail(String email);
+    void deleteByEmail(String email);
+}
