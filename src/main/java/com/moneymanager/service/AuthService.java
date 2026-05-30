@@ -15,6 +15,7 @@ import com.moneymanager.model.PasswordResetToken;
 import com.moneymanager.repository.PasswordResetTokenRepository;
 import com.moneymanager.service.EmailService;
 
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.Random;
 @Service
@@ -26,6 +27,8 @@ public class AuthService {
     private final JwtService jwtService;
     private final PasswordResetTokenRepository passwordResetTokenRepository;
     private final EmailService emailService;
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
     // @Lazy breaks the circular dependency.
     // Spring won't try to build UserCategoryService at startup —
     // it creates a proxy and only resolves it on the first actual call.
@@ -68,7 +71,7 @@ public class AuthService {
         passwordResetTokenRepository.deleteByEmail(email);
 
         // Generate 6-digit OTP
-        String otp = String.format("%06d", new Random().nextInt(999999));
+        String otp = String.format("%06d", SECURE_RANDOM.nextInt(999999));
 
         // Save OTP to DB with 10 min expiry
         PasswordResetToken token = new PasswordResetToken();
