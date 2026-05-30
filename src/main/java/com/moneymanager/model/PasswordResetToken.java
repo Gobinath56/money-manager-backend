@@ -19,6 +19,11 @@ public class PasswordResetToken {
     private LocalDateTime expiresAt;
     private boolean used;
 
+    // FIX: track how many times the user has entered a wrong OTP
+    // After MAX_OTP_ATTEMPTS (3) failures the token is deleted and
+    // the user must request a fresh OTP — stops brute-force attacks
+    private int failedAttempts = 0;
+
     public boolean isExpired() {
         return LocalDateTime.now().isAfter(expiresAt);
     }

@@ -10,15 +10,12 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import com.moneymanager.dto.ChangePasswordRequest;
-import com.moneymanager.dto.ForgotPasswordRequest;
 import com.moneymanager.dto.ResetPasswordRequest;
 import com.moneymanager.model.PasswordResetToken;
 import com.moneymanager.repository.PasswordResetTokenRepository;
-import com.moneymanager.service.EmailService;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
-import java.util.Random;
 
 @Slf4j
 @Service
@@ -32,10 +29,14 @@ public class AuthService {
     private final EmailService emailService;
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
-    // @Lazy breaks the circular dependency.
-    // Spring won't try to build UserCategoryService at startup —
-    // it creates a proxy and only resolves it on the first actual call.
+    // FIX: max wrong OTP attempts before the token is invalidated
+    private static final int MAX_OTP_ATTEMPTS = 3;
+
     private final @Lazy UserCategoryService userCategoryService;
+
+    // ═══════════════════════════════════════════
+    //  REGISTER
+    // ═══════════════════════════════════════════
 
     public AuthResponse register(AuthRequest request) {
         if (userRepository.existsByEmail(request.getEmail())) {
@@ -47,12 +48,15 @@ public class AuthService {
         user.setPassword(passwordEncoder.encode(request.getPassword()));
         userRepository.save(user);
 
-        // Called lazily — UserCategoryService is resolved here, not at startup
         userCategoryService.seedDefaultsForUser(user.getEmail());
 
         String token = jwtService.generateToken(user.getEmail());
         return new AuthResponse(token, user.getEmail());
     }
+
+    // ═══════════════════════════════════════════
+    //  LOGIN
+    // ═══════════════════════════════════════════
 
     public AuthResponse login(AuthRequest request) {
         User user = userRepository.findByEmail(request.getEmail())
@@ -65,15 +69,20 @@ public class AuthService {
         String token = jwtService.generateToken(user.getEmail());
         return new AuthResponse(token, user.getEmail());
     }
+
+    // ═══════════════════════════════════════════
+    //  FORGOT PASSWORD — send OTP
+    // ═══════════════════════════════════════════
+
     public void forgotPassword(String email) {
         userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("No account found with this email"));
 
+        // Delete any existing token for this email before creating a new one
         passwordResetTokenRepository.deleteByEmail(email);
 
         String otp = String.format("%06d", SECURE_RANDOM.nextInt(999999));
 
-        // ── TEMP: log OTP so you can test reset flow without SMTP ──
         log.info(">>> OTP for {} is: {}", email, otp);
 
         PasswordResetToken token = new PasswordResetToken();
@@ -81,13 +90,22 @@ public class AuthService {
         token.setOtp(otp);
         token.setExpiresAt(LocalDateTime.now().plusMinutes(10));
         token.setUsed(false);
+        // FIX: track failed attempts — starts at 0
+        token.setFailedAttempts(0);
         passwordResetTokenRepository.save(token);
 
         emailService.sendOtpEmail(email, otp);
     }
-    // ── Method 2: Reset Password ──────────────────────────────────────────────
+
+    // ═══════════════════════════════════════════
+    //  RESET PASSWORD — verify OTP + set new password
+    //
+    //  FIX: After MAX_OTP_ATTEMPTS (3) wrong guesses, the token is deleted.
+    //  The user must request a fresh OTP. This stops brute-forcing even if
+    //  the per-IP rate limiter is somehow bypassed.
+    // ═══════════════════════════════════════════
+
     public void resetPassword(ResetPasswordRequest request) {
-        // Find OTP record
         PasswordResetToken token = passwordResetTokenRepository
                 .findByEmail(request.getEmail())
                 .orElseThrow(() -> new RuntimeException("OTP not found. Please request a new one"));
@@ -103,12 +121,35 @@ public class AuthService {
             throw new RuntimeException("OTP expired. Please request a new one");
         }
 
-        // Check OTP matches
-        if (!token.getOtp().equals(request.getOtp())) {
-            throw new RuntimeException("Invalid OTP. Please try again");
+        // FIX: Check if too many failed attempts
+        if (token.getFailedAttempts() >= MAX_OTP_ATTEMPTS) {
+            passwordResetTokenRepository.deleteByEmail(request.getEmail());
+            throw new RuntimeException(
+                    "Too many incorrect attempts. Please request a new OTP"
+            );
         }
 
-        // Update password
+        // Check OTP matches
+        if (!token.getOtp().equals(request.getOtp())) {
+            // FIX: increment failed attempts and save
+            token.setFailedAttempts(token.getFailedAttempts() + 1);
+            int remaining = MAX_OTP_ATTEMPTS - token.getFailedAttempts();
+
+            if (remaining <= 0) {
+                // Delete immediately on last failed attempt
+                passwordResetTokenRepository.deleteByEmail(request.getEmail());
+                throw new RuntimeException(
+                        "Invalid OTP. Too many attempts — please request a new OTP"
+                );
+            }
+
+            passwordResetTokenRepository.save(token);
+            throw new RuntimeException(
+                    "Invalid OTP. " + remaining + " attempt" + (remaining == 1 ? "" : "s") + " remaining"
+            );
+        }
+
+        // OTP is correct — update the password
         User user = userRepository.findByEmail(request.getEmail())
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
@@ -119,24 +160,23 @@ public class AuthService {
         passwordResetTokenRepository.deleteByEmail(request.getEmail());
     }
 
-    // ── Method 3: Change Password (logged in user) ────────────────────────────
+    // ═══════════════════════════════════════════
+    //  CHANGE PASSWORD (logged-in user)
+    // ═══════════════════════════════════════════
+
     public void changePassword(String email, ChangePasswordRequest request) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        // Verify current password
         if (!passwordEncoder.matches(request.getCurrentPassword(), user.getPassword())) {
             throw new RuntimeException("Current password is incorrect");
         }
 
-        // Check new password is different
         if (passwordEncoder.matches(request.getNewPassword(), user.getPassword())) {
             throw new RuntimeException("New password must be different from current password");
         }
 
-        // Update password
         user.setPassword(passwordEncoder.encode(request.getNewPassword()));
         userRepository.save(user);
     }
-
 }
