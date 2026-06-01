@@ -31,6 +31,8 @@ public class SecurityConfig {
 
                 .authorizeHttpRequests(auth -> auth
                                 .requestMatchers("/api/auth/**").permitAll()
+                                .requestMatchers("/api/health").permitAll()
+
                                 // /api/auth/register and /api/auth/login are public — no token needed
 
                                 .anyRequest().authenticated()

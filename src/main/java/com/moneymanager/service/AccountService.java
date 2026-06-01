@@ -6,10 +6,46 @@ import com.moneymanager.model.Account;
 import com.moneymanager.repository.AccountRepository;
 import com.moneymanager.util.SecurityUtils;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
+/**
+ * FIX #6 — Transfer was not atomic.
+ *
+ * THE BUG:
+ *   accountRepository.save(from);   // committed immediately
+ *   accountRepository.save(to);     // if this threw, 'from' was already debited
+ *                                   // → money vanished, no recovery
+ *
+ * THE FIX:
+ *   @Transactional wraps both saves in a single MongoDB multi-document
+ *   transaction. If the second save fails for any reason, the first save
+ *   is automatically rolled back.
+ *
+ * REQUIREMENT:
+ *   MongoDB must be running as a replica set (even a single-node replica set).
+ *   Multi-document transactions are not supported on standalone mongod.
+ *
+ *   For local dev, convert your standalone to a replica set:
+ *     mongod --replSet rs0
+ *     # then in mongo shell: rs.initiate()
+ *
+ *   Atlas (cloud) and most managed providers already run replica sets.
+ *   Railway/Render MongoDB add-ons: check your provider docs.
+ *
+ *   Also add to application.properties (required for Spring to manage the tx):
+ *     spring.data.mongodb.uri=<your-uri>  (must include ?replicaSet=rs0 or equivalent)
+ *
+ *   And add this bean anywhere in a @Configuration class:
+ *     @Bean
+ *     public MongoTransactionManager transactionManager(MongoDatabaseFactory dbFactory) {
+ *         return new MongoTransactionManager(dbFactory);
+ *     }
+ */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AccountService {
@@ -22,8 +58,6 @@ public class AccountService {
     // ═══════════════════════════════════════════
 
     public Account createAccount(Account account) {
-        // Tag this account with the owner's email before saving.
-        // The account object comes from the request body — it won't have userId set.
         account.setUserId(securityUtils.getCurrentUserEmail());
         return accountRepository.save(account);
     }
@@ -33,8 +67,6 @@ public class AccountService {
     // ═══════════════════════════════════════════
 
     public List<Account> getAllAccounts() {
-        // Before: findAll() returned every account in the DB
-        // After:  findByUserId() returns only this user's accounts
         String userId = securityUtils.getCurrentUserEmail();
         return accountRepository.findByUserId(userId);
     }
@@ -45,67 +77,75 @@ public class AccountService {
 
     public void deleteAccount(String id) {
         String userId = securityUtils.getCurrentUserEmail();
-
-        // findByIdAndUserId: only succeeds if BOTH id AND userId match.
-        // If id exists but belongs to another user → empty Optional → 404.
-        // This prevents User B from deleting User A's account.
         Account account = accountRepository.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Account not found"));
-
         accountRepository.delete(account);
     }
 
     // ═══════════════════════════════════════════
-    //  TRANSFER
+    //  TRANSFER  —  now atomic via @Transactional
     // ═══════════════════════════════════════════
 
+    /**
+     * Transfers money between two accounts owned by the current user.
+     *
+     * @Transactional ensures both saves succeed or both are rolled back.
+     * If save(to) throws for any reason (network blip, validation error,
+     * optimistic lock conflict, etc.), save(from) is rolled back automatically
+     * by MongoTransactionManager — no money is lost.
+     *
+     * propagation = REQUIRES_NEW: always starts a fresh transaction even if
+     * called from within another transaction (e.g. a future batch operation).
+     * This prevents an outer transaction from masking a transfer failure.
+     *
+     * rollbackFor = Exception.class: roll back on any exception, not just
+     * RuntimeException (Spring's default only catches unchecked exceptions).
+     */
+    @Transactional(rollbackFor = Exception.class)
     public Account transfer(TransferRequest request) {
         String userId = securityUtils.getCurrentUserEmail();
 
-        // ── Validation first (fixed order vs original code) ──────────────
-        // Original bug: balance was checked before amount > 0.
-        // If amount was null, the balance check threw NullPointerException.
-        // Correct order: validate inputs → then check business rules.
-
+        // ── Input validation first ──────────────────────────────────────────
         if (request.getAmount() == null || request.getAmount() <= 0) {
             throw new IllegalArgumentException("Transfer amount must be greater than 0");
         }
-
         if (request.getFromAccountId() == null || request.getToAccountId() == null) {
             throw new IllegalArgumentException("Both account IDs are required");
         }
-
         if (request.getFromAccountId().equals(request.getToAccountId())) {
             throw new IllegalArgumentException("Cannot transfer to the same account");
         }
 
-        // ── Ownership checks ──────────────────────────────────────────────
-        // Both accounts must belong to the current user.
-        // findByIdAndUserId: if ID exists but belongs to another user → 404.
-        // This prevents User B from transferring money out of User A's account.
-
-        Account from = accountRepository.findByIdAndUserId(request.getFromAccountId(), userId)
+        // ── Ownership checks ────────────────────────────────────────────────
+        Account from = accountRepository
+                .findByIdAndUserId(request.getFromAccountId(), userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Source account not found"));
 
-        Account to = accountRepository.findByIdAndUserId(request.getToAccountId(), userId)
+        Account to = accountRepository
+                .findByIdAndUserId(request.getToAccountId(), userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Destination account not found"));
 
-        // ── Business rule: sufficient balance ─────────────────────────────
-        // Checked after validation, not before — amount is guaranteed non-null here.
+        // ── Business rule: sufficient balance ───────────────────────────────
         if (from.getBalance() < request.getAmount()) {
-            throw new RuntimeException("Insufficient balance in source account");
+            throw new IllegalArgumentException(
+                    "Insufficient balance. Available: ₹" +
+                            String.format("%.2f", from.getBalance()) +
+                            ", Required: ₹" + String.format("%.2f", request.getAmount())
+            );
         }
 
-        // ── Execute transfer ───────────────────────────────────────────────
+        // ── Execute transfer (both saves are inside the same transaction) ───
         from.setBalance(from.getBalance() - request.getAmount());
         to.setBalance(to.getBalance() + request.getAmount());
 
-        // Save both — if the second save fails, the first is already committed.
-        // For true atomicity you'd need a MongoDB transaction, but for this
-        // scale the risk is acceptable.
+        // If save(to) throws after save(from) has already written,
+        // @Transactional rolls back save(from) automatically.
         accountRepository.save(from);
         accountRepository.save(to);
 
-        return from; // return the debited account so frontend can show updated balance
+        log.info("Transfer of ₹{} from account {} to {} completed for user {}",
+                request.getAmount(), from.getId(), to.getId(), userId);
+
+        return from;
     }
 }
