@@ -19,8 +19,6 @@ public class UserCategoryService {
     private final UserCategoryRepository categoryRepository;
     private final SecurityUtils securityUtils;
 
-    // ── Default subcategories seeded for every user ───────────────────────
-    // Called after first login — gives users a useful starting point
     private static final List<UserCategory> DEFAULTS = List.of(
             makeDefault("FOOD",       TransactionType.EXPENSE, List.of("Breakfast","Lunch","Dinner","Snacks","Groceries","Restaurant")),
             makeDefault("FUEL",       TransactionType.EXPENSE, List.of("Petrol","Diesel","EV Charge","CNG")),
@@ -45,9 +43,7 @@ public class UserCategoryService {
     }
 
     // ── Seed defaults for a new user ──────────────────────────────────────
-    // Call this from AuthService.register() after saving the user
     public void seedDefaultsForUser(String userId) {
-        // Only seed if user has no categories yet
         if (!categoryRepository.findByUserId(userId).isEmpty()) return;
 
         DEFAULTS.forEach(template -> {
@@ -76,19 +72,66 @@ public class UserCategoryService {
     public UserCategory create(UserCategoryRequest request) {
         String userId = securityUtils.getCurrentUserEmail();
 
-        // Check duplicate name for this type
-        categoryRepository.findByUserIdAndName(userId, request.getName().toUpperCase())
-                .ifPresent(c -> { throw new RuntimeException("Category already exists"); });
+        // FIX #2 — Sanitize category name before saving.
+        //
+        // THE BUG:
+        //   Only .toUpperCase().trim() was applied. A user could save
+        //   "<script>alert('xss')</script>" as a category name. It would
+        //   be stored in MongoDB and rendered on every frontend page that
+        //   displays categories — affecting all the user's devices.
+        //
+        // THE FIX:
+        //   Strip everything except A-Z, 0-9, underscore, and space.
+        //   Then check the result is not empty before proceeding.
+        //   Examples:
+        //     "My Food"               → "MY FOOD"         ✓ allowed
+        //     "TRIP_2024"             → "TRIP_2024"        ✓ allowed
+        //     "<script>alert</script>"→ "SCRIPTALERTSCRIPT" → valid but harmless
+        //     "!!!###"                → ""                 → rejected below
+        String name = request.getName()
+                .toUpperCase()
+                .trim()
+                .replaceAll("[^A-Z0-9_ ]", ""); // strip all special characters
+
+        // Reject if sanitization left an empty string
+        if (name.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Category name contains invalid characters. " +
+                            "Only letters, numbers, spaces and underscores are allowed."
+            );
+        }
+
+        // Reject if longer than 30 characters (prevent DB bloat / UI overflow)
+        if (name.length() > 30) {
+            throw new IllegalArgumentException(
+                    "Category name must be 30 characters or fewer."
+            );
+        }
+
+        // Check duplicate name for this user
+        categoryRepository.findByUserIdAndName(userId, name)
+                .ifPresent(c -> {
+                    throw new RuntimeException("Category '" + name + "' already exists");
+                });
+
+        // Sanitize each subcategory name the same way
+        List<String> cleanSubs = new ArrayList<>();
+        if (request.getSubCategories() != null) {
+            for (String sub : request.getSubCategories()) {
+                // Subcategories allow mixed case and more characters (they are
+                // display labels, not enum-style keys) — but still strip HTML
+                String cleanSub = sub.trim().replaceAll("[<>\"'&;]", "");
+                if (!cleanSub.isEmpty() && cleanSub.length() <= 50) {
+                    cleanSubs.add(cleanSub);
+                }
+            }
+        }
 
         UserCategory category = new UserCategory();
         category.setUserId(userId);
-        category.setName(request.getName().toUpperCase().trim());
+        category.setName(name);
         category.setType(request.getType());
-        category.setSubCategories(
-                request.getSubCategories() != null
-                        ? request.getSubCategories()
-                        : new ArrayList<>()
-        );
+        category.setSubCategories(cleanSubs);
         category.setCustom(true);
 
         return categoryRepository.save(category);
@@ -100,8 +143,17 @@ public class UserCategoryService {
         UserCategory category = categoryRepository.findByIdAndUserId(categoryId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Category not found"));
 
-        if (!category.getSubCategories().contains(subCategoryName)) {
-            category.getSubCategories().add(subCategoryName.trim());
+        // FIX #2 — sanitize subcategory names too
+        String cleanSub = subCategoryName.trim().replaceAll("[<>\"'&;]", "");
+        if (cleanSub.isEmpty()) {
+            throw new IllegalArgumentException("Subcategory name contains invalid characters.");
+        }
+        if (cleanSub.length() > 50) {
+            throw new IllegalArgumentException("Subcategory name must be 50 characters or fewer.");
+        }
+
+        if (!category.getSubCategories().contains(cleanSub)) {
+            category.getSubCategories().add(cleanSub);
             categoryRepository.save(category);
         }
         return category;
@@ -118,7 +170,6 @@ public class UserCategoryService {
     }
 
     // ── Delete custom category ────────────────────────────────────────────
-    // Only custom categories can be deleted — defaults are protected
     public void delete(String categoryId) {
         String userId = securityUtils.getCurrentUserEmail();
         UserCategory category = categoryRepository.findByIdAndUserId(categoryId, userId)

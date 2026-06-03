@@ -12,6 +12,10 @@ import com.moneymanager.repository.TransactionRepository;
 import com.moneymanager.util.SecurityUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -26,6 +30,9 @@ public class TransactionService {
     private final TransactionRepository transactionRepository;
     private final AccountRepository     accountRepository;
     private final SecurityUtils         securityUtils;
+
+    // Maximum page size — prevents a caller sending size=99999
+    private static final int MAX_PAGE_SIZE = 100;
 
     // ═══════════════════════════════════════════
     //  CREATE
@@ -45,7 +52,6 @@ public class TransactionService {
         if (request.getType() == TransactionType.INCOME) {
             account.setBalance(account.getBalance() + request.getAmount());
         } else {
-            // FIX: strict balance floor — never allow negative balance
             double newBalance = account.getBalance() - request.getAmount();
             if (newBalance < 0) {
                 throw new IllegalArgumentException(
@@ -76,11 +82,42 @@ public class TransactionService {
     }
 
     // ═══════════════════════════════════════════
-    //  GET ALL
+    //  GET ALL  —  used by dashboard (needs full list for sums)
     // ═══════════════════════════════════════════
 
     public List<Transaction> getAllTransactions() {
         return transactionRepository.findByUserId(securityUtils.getCurrentUserEmail());
+    }
+
+    // ═══════════════════════════════════════════
+    //  GET PAGED  —  FIX #5
+    //
+    //  Used by TransactionsPage (the main transaction list).
+    //  Returns only the records for the requested page instead of
+    //  loading everything into memory.
+    //
+    //  sortBy is validated against an allowed list to prevent
+    //  arbitrary field injection via the query string.
+    // ═══════════════════════════════════════════
+
+    public Page<Transaction> getPagedTransactions(
+            int page, int size, String sortBy, String sortDir) {
+
+        // Clamp page size so nobody can request 99999 records
+        int safeSize = Math.min(size, MAX_PAGE_SIZE);
+
+        // Whitelist sortable fields — reject anything not in this list
+        Set<String> allowedSortFields = Set.of("date", "amount", "createdAt");
+        String safeSortBy = allowedSortFields.contains(sortBy) ? sortBy : "date";
+
+        Sort sort = sortDir.equalsIgnoreCase("asc")
+                ? Sort.by(safeSortBy).ascending()
+                : Sort.by(safeSortBy).descending();
+
+        Pageable pageable = PageRequest.of(page, safeSize, sort);
+
+        return transactionRepository.findByUserId(
+                securityUtils.getCurrentUserEmail(), pageable);
     }
 
     // ═══════════════════════════════════════════
@@ -97,19 +134,13 @@ public class TransactionService {
 
     // ═══════════════════════════════════════════
     //  UPDATE
-    //
-    //  FIX: Proper atomic balance correction.
-    //  Step 1: reverse old transaction effect on old account.
-    //  Step 2: validate new balance BEFORE applying.
-    //  Step 3: apply new transaction effect.
-    //  If step 3 fails, step 1 is rolled back so data stays consistent.
     // ═══════════════════════════════════════════
 
     public Transaction updateTransaction(String id, TransactionRequest request) {
         Transaction transaction = getTransactionById(id);
         String userId = securityUtils.getCurrentUserEmail();
 
-        // ── Step 1: reverse the old transaction on the old account ─────────
+        // Step 1: reverse the old transaction on the old account
         Account oldAccount = null;
         if (transaction.getAccountId() != null) {
             oldAccount = accountRepository
@@ -118,26 +149,20 @@ public class TransactionService {
 
             if (oldAccount != null) {
                 if (transaction.getType() == TransactionType.INCOME) {
-                    // reversing income: subtract it back
                     double reversedBalance = oldAccount.getBalance() - transaction.getAmount();
-                    // FIX: even reversing income cannot push balance below 0
-                    // (it shouldn't normally, but guards against data corruption)
                     oldAccount.setBalance(Math.max(0, reversedBalance));
                 } else {
-                    // reversing expense: add it back
                     oldAccount.setBalance(oldAccount.getBalance() + transaction.getAmount());
                 }
                 accountRepository.save(oldAccount);
             }
         }
 
-        // ── Step 2: validate and apply on the new account ──────────────────
-        // FIX: capture oldAccount in a final variable so it can be used inside lambda
+        // Step 2: validate and apply on the new account
         final Account finalOldAccount = oldAccount;
         Account newAccount = accountRepository
                 .findByIdAndUserId(request.getAccountId(), userId)
                 .orElseThrow(() -> {
-                    // rollback step 1 before throwing
                     rollbackOldAccount(finalOldAccount, transaction);
                     return new ResourceNotFoundException("Account not found");
                 });
@@ -147,7 +172,6 @@ public class TransactionService {
         } else {
             double newBalance = newAccount.getBalance() - request.getAmount();
             if (newBalance < 0) {
-                // FIX: rollback step 1 before throwing so data stays consistent
                 rollbackOldAccount(finalOldAccount, transaction);
                 throw new IllegalArgumentException(
                         "Insufficient balance after update. Available: ₹" +
@@ -159,7 +183,7 @@ public class TransactionService {
         }
         accountRepository.save(newAccount);
 
-        // ── Step 3: persist the updated transaction ────────────────────────
+        // Step 3: persist the updated transaction
         transaction.setAccountId(request.getAccountId());
         transaction.setType(request.getType());
         transaction.setAmount(request.getAmount());
@@ -173,7 +197,6 @@ public class TransactionService {
         return transactionRepository.save(transaction);
     }
 
-    // ── Rollback helper: re-apply old transaction effect if step 2 fails ──
     private void rollbackOldAccount(Account oldAccount, Transaction oldTx) {
         if (oldAccount == null) return;
         try {
@@ -184,7 +207,8 @@ public class TransactionService {
             }
             accountRepository.save(oldAccount);
         } catch (Exception e) {
-            log.error("Failed to rollback old account {} during update: {}", oldAccount.getId(), e.getMessage());
+            log.error("Failed to rollback old account {} during update: {}",
+                    oldAccount.getId(), e.getMessage());
         }
     }
 
@@ -195,15 +219,21 @@ public class TransactionService {
     public void deleteTransaction(String id) {
         Transaction transaction = getTransactionById(id);
 
+        // FIX #8 — guard against null accountId (old transactions may not
+        // have one linked). Without this check, findByIdAndUserId receives
+        // null and throws NullPointerException instead of silently skipping.
+        if (transaction.getAccountId() == null) {
+            transactionRepository.delete(transaction);
+            return;
+        }
+
         accountRepository.findByIdAndUserId(
                         transaction.getAccountId(),
                         securityUtils.getCurrentUserEmail())
                 .ifPresent(account -> {
                     if (transaction.getType() == TransactionType.INCOME) {
-                        // reversing income: subtract — but floor at 0
                         account.setBalance(Math.max(0, account.getBalance() - transaction.getAmount()));
                     } else {
-                        // reversing expense: add back
                         account.setBalance(account.getBalance() + transaction.getAmount());
                     }
                     accountRepository.save(account);
@@ -217,11 +247,8 @@ public class TransactionService {
     // ═══════════════════════════════════════════
 
     public List<Transaction> getFilteredTransactions(
-            Division division,
-            String category,
-            LocalDateTime startDate,
-            LocalDateTime endDate
-    ) {
+            Division division, String category,
+            LocalDateTime startDate, LocalDateTime endDate) {
         String userId = securityUtils.getCurrentUserEmail();
         return transactionRepository.findByUserId(userId).stream()
                 .filter(t -> division  == null || t.getDivision().equals(division))
@@ -294,11 +321,11 @@ public class TransactionService {
                 } else {
                     double newBalance = account.getBalance() - request.getAmount();
                     if (newBalance >= 0) {
-                        // FIX: only deduct if balance stays >= 0
                         account.setBalance(newBalance);
                         accountRepository.save(account);
                     } else {
-                        log.warn("Recurring transaction skipped balance deduction for account {} — insufficient funds", account.getId());
+                        log.warn("Recurring transaction skipped balance deduction " +
+                                "for account {} — insufficient funds", account.getId());
                     }
                 }
             }
@@ -343,9 +370,7 @@ public class TransactionService {
 
     private List<Transaction> filterByDateRange(
             List<Transaction> transactions,
-            LocalDateTime start,
-            LocalDateTime end
-    ) {
+            LocalDateTime start, LocalDateTime end) {
         return transactions.stream()
                 .filter(t -> !t.getDate().isBefore(start) && !t.getDate().isAfter(end))
                 .collect(Collectors.toList());

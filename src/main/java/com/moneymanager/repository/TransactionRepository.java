@@ -3,6 +3,8 @@ package com.moneymanager.repository;
 import com.moneymanager.model.Transaction;
 import com.moneymanager.model.Transaction.Division;
 import com.moneymanager.model.Transaction.TransactionType;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.mongodb.repository.MongoRepository;
 import org.springframework.stereotype.Repository;
 
@@ -13,83 +15,48 @@ import java.util.Optional;
 @Repository
 public interface TransactionRepository extends MongoRepository<Transaction, String> {
 
-    // ═══════════════════════════════════════════════════════════════════════
-    //  HOW SPRING DATA DERIVED QUERIES WORK
-    // ═══════════════════════════════════════════════════════════════════════
-    // Spring reads the method name and generates the MongoDB query for you.
-    // Pattern: findBy + <Field> + And + <Field> + ...
+    // ── Paginated query — used by TransactionsPage (the main list) ────────
     //
-    // findByUserId(email)
-    //   → db.transactions.find({ userId: email })
+    // FIX #5 — was findByUserId(String) which loads ALL transactions into
+    // memory on every request. With 1000+ records this causes:
+    //   - Slow API response (all data transferred at once)
+    //   - High memory usage on the server
+    //   - Slow frontend render (React processes all rows)
     //
-    // findByUserIdAndType(email, type)
-    //   → db.transactions.find({ userId: email, type: type })
+    // Now: Page<Transaction> findByUserId(String, Pageable)
+    //   Spring Data automatically adds SKIP + LIMIT to the MongoDB query.
+    //   The frontend sends ?page=0&size=25 and gets back exactly 25 records
+    //   plus the total count so it can render page numbers.
     //
-    // findByUserIdAndDateBetween(email, start, end)
-    //   → db.transactions.find({ userId: email, date: { $gte: start, $lte: end } })
-    //
-    // "Between" is a Spring Data keyword that maps to $gte / $lte automatically.
-    // No @Query annotation needed unless the logic can't be expressed in the name.
-    // ═══════════════════════════════════════════════════════════════════════
+    // The original findByUserId(String) is kept below for:
+    //   - getDashboardData() which needs ALL transactions for sum calculations
+    //   - getFilteredTransactions() which filters in memory
+    //   These are aggregate operations that genuinely need all records.
+    Page<Transaction> findByUserId(String userId, Pageable pageable);
 
-    // ── Primary query: all transactions for a user ────────────────────────
-    // Used by: getAllTransactions(), getDashboardData(), getFilteredTransactions()
-    // Replaces the old findAll() that returned everyone's data.
+    // ── Full list — still needed for dashboard aggregations ───────────────
     List<Transaction> findByUserId(String userId);
 
-    // ── Filter by type (INCOME / EXPENSE) for a user ─────────────────────
-    // Used when you want to split income vs expense without loading everything.
     List<Transaction> findByUserIdAndType(String userId, TransactionType type);
-
-    // ── Filter by division for a user ────────────────────────────────────
-    // Division = OFFICE or PERSONAL
     List<Transaction> findByUserIdAndDivision(String userId, Division division);
-
-    // ── Filter by category for a user ────────────────────────────────────
-    // Category = FOOD, FUEL, SALARY etc.
     List<Transaction> findByUserIdAndCategory(String userId, String category);
 
-    // ── Filter by date range for a user ──────────────────────────────────
-    // "Between" keyword → $gte startDate AND $lte endDate
     List<Transaction> findByUserIdAndDateBetween(
-            String userId,
-            LocalDateTime startDate,
-            LocalDateTime endDate
-    );
+            String userId, LocalDateTime startDate, LocalDateTime endDate);
 
-    // ── Filter by type AND date range for a user ──────────────────────────
-    // Useful for: "show me all EXPENSE transactions this month"
     List<Transaction> findByUserIdAndTypeAndDateBetween(
-            String userId,
-            TransactionType type,
-            LocalDateTime startDate,
-            LocalDateTime endDate
-    );
+            String userId, TransactionType type,
+            LocalDateTime startDate, LocalDateTime endDate);
 
-    // ── Filter by division AND date range for a user ──────────────────────
-    // Useful for: "show me all OFFICE transactions this week"
     List<Transaction> findByUserIdAndDivisionAndDateBetween(
-            String userId,
-            Division division,
-            LocalDateTime startDate,
-            LocalDateTime endDate
-    );
+            String userId, Division division,
+            LocalDateTime startDate, LocalDateTime endDate);
 
-    // ── Filter by category AND date range for a user ──────────────────────
-    // Useful for: "how much did I spend on FOOD this month?"
     List<Transaction> findByUserIdAndCategoryAndDateBetween(
-            String userId,
-            String category,
-            LocalDateTime startDate,
-            LocalDateTime endDate
-    );
+            String userId, String category,
+            LocalDateTime startDate, LocalDateTime endDate);
 
-    // ── Count transactions for a user (no data transfer, just a number) ───
-    // Useful for: pagination total count, dashboard stats
     long countByUserId(String userId);
 
-    // ── Check if a specific transaction belongs to a user ─────────────────
-    // Used as an ownership check before sensitive operations.
-    // Returns Optional — empty if ID doesn't exist OR doesn't belong to userId.
     Optional<Transaction> findByIdAndUserId(String id, String userId);
 }
